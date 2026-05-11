@@ -103,7 +103,7 @@ def pick_name(vmess: dict[str, Any], index: int) -> str:
     )
 
 
-def vmess_to_clash_proxy(vmess: dict[str, Any], index: int) -> dict[str, Any]:
+def vmess_to_clash_proxy(vmess: dict[str, Any], index: int, udp_enabled: bool = False) -> dict[str, Any]:
     server = str(vmess.get("add") or "").strip()
     uuid = str(vmess.get("id") or "").strip()
     port = as_int(vmess.get("port"), 443)
@@ -127,7 +127,7 @@ def vmess_to_clash_proxy(vmess: dict[str, Any], index: int) -> dict[str, Any]:
         "uuid": uuid,
         "alterId": as_int(vmess.get("aid"), 0),
         "cipher": str(vmess.get("scy") or "auto").strip() or "auto",
-        "udp": True,
+        "udp": udp_enabled,
         "tls": tls_enabled,
         "network": network,
     }
@@ -177,7 +177,7 @@ def vmess_to_clash_proxy(vmess: dict[str, Any], index: int) -> dict[str, Any]:
     return proxy
 
 
-def vless_to_clash_proxy(vless: dict[str, Any], index: int) -> dict[str, Any]:
+def vless_to_clash_proxy(vless: dict[str, Any], index: int, udp_enabled: bool = False) -> dict[str, Any]:
     server = str(vless.get("add") or "").strip()
     uuid = str(vless.get("id") or "").strip()
     port = as_int(vless.get("port"), 443)
@@ -201,7 +201,7 @@ def vless_to_clash_proxy(vless: dict[str, Any], index: int) -> dict[str, Any]:
         "server": server,
         "port": port,
         "uuid": uuid,
-        "udp": True,
+        "udp": udp_enabled,
         "tls": tls_enabled,
         "network": network,
     }
@@ -266,11 +266,11 @@ def vless_to_clash_proxy(vless: dict[str, Any], index: int) -> dict[str, Any]:
     return proxy
 
 
-def link_to_clash_proxy(link: str, index: int) -> dict[str, Any]:
+def link_to_clash_proxy(link: str, index: int, udp_enabled: bool = False) -> dict[str, Any]:
     if link.startswith("vmess://"):
-        return vmess_to_clash_proxy(decode_vmess_link(link), index)
+        return vmess_to_clash_proxy(decode_vmess_link(link), index, udp_enabled)
     if link.startswith("vless://"):
-        return vless_to_clash_proxy(decode_vless_link(link), index)
+        return vless_to_clash_proxy(decode_vless_link(link), index, udp_enabled)
     raise ValueError("Only vmess:// and vless:// links are supported")
 
 
@@ -320,10 +320,16 @@ def links_from_sub_query(query: dict[str, list[str]]) -> list[str]:
     return links
 
 
-def direct_subscription_path(links: list[str], use_default_rules: bool = False) -> str:
+def direct_subscription_path(
+    links: list[str],
+    use_default_rules: bool = False,
+    use_udp: bool = False,
+) -> str:
     params: list[tuple[str, str]] = [("url", link) for link in links]
     if use_default_rules:
         params.append(("default_rules", "1"))
+    if use_udp:
+        params.append(("udp", "1"))
     return f"/sub?{urlencode(params, quote_via=quote)}"
 
 
@@ -331,14 +337,16 @@ def one_time_subscription_response(
     links: list[str],
     name: str,
     use_default_rules: bool,
+    use_udp: bool = False,
     base_url: str = "",
 ) -> dict[str, Any]:
-    path = direct_subscription_path(links, use_default_rules)
+    path = direct_subscription_path(links, use_default_rules, use_udp)
     url = f"{base_url}{path}" if base_url else path
     return {
         "name": name,
         "links_count": len(links),
         "use_default_rules": use_default_rules,
+        "use_udp": use_udp,
         "subscription_path": path,
         "subscription_url": url,
         "direct_subscription_path": path,
@@ -384,11 +392,12 @@ def build_clash_config(
     links: list[str],
     subscription_name: str = "Proxy Subscription",
     use_default_rules: bool = False,
+    use_udp: bool = False,
 ) -> dict[str, Any]:
     if not links:
         raise ValueError("No vmess or vless links supplied")
 
-    proxies = [link_to_clash_proxy(link, index) for index, link in enumerate(links, start=1)]
+    proxies = [link_to_clash_proxy(link, index, use_udp) for index, link in enumerate(links, start=1)]
     proxy_names = [proxy["name"] for proxy in proxies]
 
     config: dict[str, Any] = {
@@ -485,8 +494,9 @@ class AppHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             links = links_from_sub_query(query)
             use_default_rules = truthy(query.get("default_rules", [""])[-1])
+            use_udp = truthy(query.get("udp", [""])[-1])
             try:
-                config = build_clash_config(links, use_default_rules=use_default_rules)
+                config = build_clash_config(links, use_default_rules=use_default_rules, use_udp=use_udp)
             except ValueError as exc:
                 self._send_error_yaml(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -505,8 +515,9 @@ class AppHandler(BaseHTTPRequestHandler):
             links = self.links_from_payload(payload)
             name = str(payload.get("name") or "Proxy Subscription")
             use_default_rules = truthy(payload.get("use_default_rules"))
+            use_udp = truthy(payload.get("use_udp"))
             try:
-                config = build_clash_config(links, name, use_default_rules)
+                config = build_clash_config(links, name, use_default_rules, use_udp)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -517,8 +528,9 @@ class AppHandler(BaseHTTPRequestHandler):
             links = self.links_from_payload(payload)
             name = str(payload.get("name") or "Proxy Subscription").strip() or "Proxy Subscription"
             use_default_rules = truthy(payload.get("use_default_rules"))
+            use_udp = truthy(payload.get("use_udp"))
             try:
-                build_clash_config(links, name, use_default_rules)
+                build_clash_config(links, name, use_default_rules, use_udp)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -527,6 +539,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 links,
                 name,
                 use_default_rules,
+                use_udp,
                 self.absolute_url(""),
             )
             self._send_json(response, status=HTTPStatus.CREATED)
@@ -717,6 +730,10 @@ class AppHandler(BaseHTTPRequestHandler):
             <input id="use-default-rules" name="use_default_rules" type="checkbox">
             <span>使用 Loyalsoldier/clash-rules 默认规则，并写入生成的 YAML</span>
           </label>
+          <label class="check-row">
+            <input id="use-udp" name="use_udp" type="checkbox">
+            <span>启用 UDP</span>
+          </label>
           <button type="submit">生成订阅链接</button>
         </form>
       </div>
@@ -759,7 +776,8 @@ class AppHandler(BaseHTTPRequestHandler):
       const payload = {{
         name: form.name.value,
         text: form.text.value,
-        use_default_rules: form.use_default_rules.checked
+        use_default_rules: form.use_default_rules.checked,
+        use_udp: form.use_udp.checked
       }};
       const response = await fetch('/api/subscriptions', {{
         method: 'POST',

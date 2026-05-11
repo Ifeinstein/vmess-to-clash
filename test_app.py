@@ -51,6 +51,7 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(proxy["name"], "demo-node")
         self.assertEqual(proxy["server"], "example.com")
         self.assertEqual(proxy["network"], "ws")
+        self.assertFalse(proxy["udp"])
         self.assertTrue(proxy["tls"])
         self.assertEqual(proxy["ws-opts"]["headers"]["Host"], "cdn.example.com")
 
@@ -64,6 +65,7 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(proxy["port"], 8443)
         self.assertEqual(proxy["uuid"], "22222222-2222-2222-2222-222222222222")
         self.assertEqual(proxy["network"], "ws")
+        self.assertFalse(proxy["udp"])
         self.assertTrue(proxy["tls"])
         self.assertEqual(proxy["servername"], "sni.example.org")
         self.assertEqual(proxy["client-fingerprint"], "chrome")
@@ -123,20 +125,33 @@ class ConverterTests(unittest.TestCase):
         self.assertIn("%23reality-node", path)
         self.assertTrue(path.endswith("&default_rules=1"))
 
+    def test_direct_subscription_path_includes_udp_when_enabled(self) -> None:
+        path = app.direct_subscription_path([SAMPLE_LINK], use_udp=True)
+
+        self.assertTrue(path.endswith("&udp=1"))
+
     def test_one_time_subscription_response_does_not_store_links(self) -> None:
         response = app.one_time_subscription_response(
             [SAMPLE_VLESS_REALITY_LINK],
             "Demo",
             use_default_rules=True,
+            use_udp=True,
             base_url="https://example.test:8443",
         )
 
         self.assertNotIn("id", response)
         self.assertNotIn("links", response)
         self.assertEqual(response["links_count"], 1)
+        self.assertTrue(response["use_udp"])
         self.assertTrue(response["subscription_url"].startswith("https://example.test:8443/sub?url="))
         self.assertIn("%23reality-node", response["subscription_url"])
-        self.assertTrue(response["subscription_url"].endswith("&default_rules=1"))
+        self.assertTrue(response["subscription_url"].endswith("&default_rules=1&udp=1"))
+
+    def test_build_clash_config_enables_udp_when_requested(self) -> None:
+        config = app.build_clash_config([SAMPLE_LINK, SAMPLE_VLESS_LINK], use_udp=True)
+
+        for proxy in config["proxies"]:
+            self.assertTrue(proxy["udp"])
 
     def test_build_clash_config_contains_group(self) -> None:
         config = app.build_clash_config([SAMPLE_LINK], "Demo")

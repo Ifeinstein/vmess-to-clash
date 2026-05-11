@@ -8,6 +8,7 @@
 
 - 支持单个或多个 `vmess://` / `vless://` 链接转换为 Clash 配置
 - 支持直接返回 YAML
+- 支持 UDP 开关，默认关闭
 - 支持创建不落库的一次性订阅链接
 - 自带一个简单网页，可直接粘贴链接生成订阅
 - 默认不在服务器保存节点原始地址
@@ -73,6 +74,14 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&default_rules=1"
 
 `default_rules` 支持 `1`、`true`、`yes`。开启后会把 Loyalsoldier/clash-rules 的 `rule-providers` 和 `RULE-SET` 写入返回的 Clash YAML。
 
+开启 UDP：
+
+```bash
+curl "http://127.0.0.1:8000/sub?url=vmess://xxx&udp=1"
+```
+
+`udp` 支持 `1`、`true`、`yes`。默认关闭。
+
 ### 2. 直接 POST 转换
 
 `POST /convert`
@@ -94,7 +103,8 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&default_rules=1"
 ```json
 {
   "name": "My Nodes",
-  "text": "vmess://xxxx\nvless://yyyy"
+  "text": "vmess://xxxx\nvless://yyyy",
+  "use_udp": true
 }
 ```
 
