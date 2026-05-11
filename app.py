@@ -15,6 +15,22 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 STORE_PATH = DATA_DIR / "subscriptions.json"
+DEFAULT_RULE_BASE_URL = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release"
+DEFAULT_RULE_PROVIDER_SPECS = {
+    "reject": "domain",
+    "icloud": "domain",
+    "apple": "domain",
+    "google": "domain",
+    "proxy": "domain",
+    "direct": "domain",
+    "private": "domain",
+    "gfw": "domain",
+    "tld-not-cn": "domain",
+    "telegramcidr": "ipcidr",
+    "cncidr": "ipcidr",
+    "lancidr": "ipcidr",
+    "applications": "classical",
+}
 
 
 def utc_now_iso() -> str:
@@ -154,14 +170,52 @@ def extract_vmess_links(text: str) -> list[str]:
     return links
 
 
-def build_clash_config(links: list[str], subscription_name: str = "VMess Subscription") -> dict[str, Any]:
+def default_rule_providers() -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "type": "http",
+            "behavior": behavior,
+            "url": f"{DEFAULT_RULE_BASE_URL}/{name}.txt",
+            "path": f"./ruleset/{name}.yaml",
+            "interval": 86400,
+        }
+        for name, behavior in DEFAULT_RULE_PROVIDER_SPECS.items()
+    }
+
+
+def default_rules(proxy_policy: str) -> list[str]:
+    return [
+        "RULE-SET,applications,DIRECT",
+        "DOMAIN,clash.razord.top,DIRECT",
+        "DOMAIN,yacd.haishan.me,DIRECT",
+        "RULE-SET,private,DIRECT",
+        "RULE-SET,reject,REJECT",
+        "RULE-SET,icloud,DIRECT",
+        "RULE-SET,apple,DIRECT",
+        f"RULE-SET,google,{proxy_policy}",
+        f"RULE-SET,proxy,{proxy_policy}",
+        "RULE-SET,direct,DIRECT",
+        "RULE-SET,lancidr,DIRECT",
+        "RULE-SET,cncidr,DIRECT",
+        f"RULE-SET,telegramcidr,{proxy_policy}",
+        "GEOIP,LAN,DIRECT",
+        "GEOIP,CN,DIRECT",
+        f"MATCH,{proxy_policy}",
+    ]
+
+
+def build_clash_config(
+    links: list[str],
+    subscription_name: str = "VMess Subscription",
+    use_default_rules: bool = False,
+) -> dict[str, Any]:
     if not links:
         raise ValueError("No vmess links supplied")
 
     proxies = [vmess_to_clash_proxy(decode_vmess_link(link), index) for index, link in enumerate(links, start=1)]
     proxy_names = [proxy["name"] for proxy in proxies]
 
-    return {
+    config: dict[str, Any] = {
         "mixed-port": 7890,
         "allow-lan": False,
         "mode": "rule",
@@ -178,6 +232,10 @@ def build_clash_config(links: list[str], subscription_name: str = "VMess Subscri
             f"MATCH,{subscription_name}",
         ],
     }
+    if use_default_rules:
+        config["rule-providers"] = default_rule_providers()
+        config["rules"] = default_rules(subscription_name)
+    return config
 
 
 def yaml_scalar(value: Any) -> str:
@@ -228,6 +286,7 @@ class Subscription:
     id: str
     name: str
     links: list[str]
+    use_default_rules: bool
     created_at: str
     updated_at: str
 
@@ -236,6 +295,7 @@ class Subscription:
             "id": self.id,
             "name": self.name,
             "links": self.links,
+            "use_default_rules": self.use_default_rules,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -246,6 +306,7 @@ class Subscription:
             id=str(data["id"]),
             name=str(data["name"]),
             links=[str(link) for link in data.get("links", [])],
+            use_default_rules=truthy(data.get("use_default_rules")),
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
         )
@@ -277,7 +338,13 @@ class SubscriptionStore:
             return None
         return Subscription.from_dict(raw)
 
-    def upsert(self, subscription_id: str | None, name: str, links: list[str]) -> Subscription:
+    def upsert(
+        self,
+        subscription_id: str | None,
+        name: str,
+        links: list[str],
+        use_default_rules: bool = False,
+    ) -> Subscription:
         payload = self._load()
         now = utc_now_iso()
         if subscription_id and subscription_id in payload:
@@ -291,6 +358,7 @@ class SubscriptionStore:
             id=actual_id,
             name=name,
             links=links,
+            use_default_rules=use_default_rules,
             created_at=created_at,
             updated_at=now,
         )
@@ -333,7 +401,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if not subscription:
                 self._send_error_yaml(HTTPStatus.NOT_FOUND, "Subscription not found")
                 return
-            self._send_yaml(config_to_yaml(build_clash_config(subscription.links, subscription.name)))
+            config = build_clash_config(
+                subscription.links,
+                subscription.name,
+                subscription.use_default_rules,
+            )
+            self._send_yaml(config_to_yaml(config))
             return
 
         if parsed.path == "/sub":
@@ -341,8 +414,9 @@ class AppHandler(BaseHTTPRequestHandler):
             links = [item for item in query.get("url", []) if item.strip()]
             if not links and "text" in query:
                 links = extract_vmess_links("\n".join(query["text"]))
+            use_default_rules = truthy(query.get("default_rules", [""])[-1])
             try:
-                config = build_clash_config(links)
+                config = build_clash_config(links, use_default_rules=use_default_rules)
             except ValueError as exc:
                 self._send_error_yaml(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -360,8 +434,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/convert":
             links = self.links_from_payload(payload)
             name = str(payload.get("name") or "VMess Subscription")
+            use_default_rules = truthy(payload.get("use_default_rules"))
             try:
-                config = build_clash_config(links, name)
+                config = build_clash_config(links, name, use_default_rules)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -371,13 +446,14 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/subscriptions":
             links = self.links_from_payload(payload)
             name = str(payload.get("name") or "VMess Subscription").strip() or "VMess Subscription"
+            use_default_rules = truthy(payload.get("use_default_rules"))
             try:
-                build_clash_config(links, name)
+                build_clash_config(links, name, use_default_rules)
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
 
-            subscription = self.store.upsert(None, name, links)
+            subscription = self.store.upsert(None, name, links, use_default_rules)
             self._send_json(self.subscription_to_response(subscription), status=HTTPStatus.CREATED)
             return
 
@@ -400,13 +476,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
         links = self.links_from_payload(payload)
         name = str(payload.get("name") or "VMess Subscription").strip() or "VMess Subscription"
+        use_default_rules = truthy(payload.get("use_default_rules"))
         try:
-            build_clash_config(links, name)
+            build_clash_config(links, name, use_default_rules)
         except ValueError as exc:
             self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
             return
 
-        subscription = self.store.upsert(subscription_id, name, links)
+        subscription = self.store.upsert(subscription_id, name, links, use_default_rules)
         self._send_json(self.subscription_to_response(subscription))
 
     def read_json_body(self) -> dict[str, Any] | None:
@@ -436,13 +513,14 @@ class AppHandler(BaseHTTPRequestHandler):
               <td>{self.escape_html(item.name)}</td>
               <td><code>/subscriptions/{self.escape_html(item.id)}</code></td>
               <td>{len(item.links)}</td>
+              <td>{"是" if item.use_default_rules else "否"}</td>
               <td>{self.escape_html(item.updated_at)}</td>
             </tr>
             """
             for item in subscriptions
         )
         if not rows:
-            rows = '<tr><td colspan="4">还没有订阅，先在上面的表单里粘贴 vmess 链接。</td></tr>'
+            rows = '<tr><td colspan="5">还没有订阅，先在上面的表单里粘贴 vmess 链接。</td></tr>'
 
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -495,7 +573,7 @@ class AppHandler(BaseHTTPRequestHandler):
       padding: 20px;
       background: var(--card);
     }}
-    textarea, input {{
+    textarea, input:not([type="checkbox"]) {{
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -504,6 +582,17 @@ class AppHandler(BaseHTTPRequestHandler):
       background: white;
     }}
     textarea {{ min-height: 220px; resize: vertical; }}
+    .check-row {{
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin: 14px 0;
+      line-height: 1.45;
+    }}
+    .check-row input {{
+      margin-top: 4px;
+      accent-color: var(--accent);
+    }}
     button {{
       border: none;
       border-radius: 999px;
@@ -569,13 +658,17 @@ class AppHandler(BaseHTTPRequestHandler):
           <input id="name" name="name" value="My VMess Subscription">
           <p class="hint">每行一个 vmess 链接。</p>
           <textarea id="text" name="text" placeholder="vmess://..."></textarea>
+          <label class="check-row">
+            <input id="use-default-rules" name="use_default_rules" type="checkbox">
+            <span>使用 Loyalsoldier/clash-rules 默认规则，并写入生成的 YAML</span>
+          </label>
           <button type="submit">生成订阅链接</button>
         </form>
       </div>
 
       <div class="panel">
-        <h2>结果</h2>
-        <pre id="result">提交后会在这里显示 JSON 响应和订阅地址。</pre>
+        <h2>结果与预览</h2>
+        <pre id="result">提交后会在这里显示订阅地址和 YAML 预览。</pre>
       </div>
     </section>
 
@@ -587,6 +680,7 @@ class AppHandler(BaseHTTPRequestHandler):
             <th>名称</th>
             <th>订阅路径</th>
             <th>节点数</th>
+            <th>默认规则</th>
             <th>更新时间</th>
           </tr>
         </thead>
@@ -601,7 +695,8 @@ class AppHandler(BaseHTTPRequestHandler):
       event.preventDefault();
       const payload = {{
         name: form.name.value,
-        text: form.text.value
+        text: form.text.value,
+        use_default_rules: form.use_default_rules.checked
       }};
       const response = await fetch('/api/subscriptions', {{
         method: 'POST',
@@ -609,9 +704,18 @@ class AppHandler(BaseHTTPRequestHandler):
         body: JSON.stringify(payload)
       }});
       const text = await response.text();
-      result.textContent = text;
       if (response.ok) {{
-        setTimeout(() => window.location.reload(), 500);
+        const data = JSON.parse(text);
+        const previewResponse = await fetch(data.subscription_path);
+        const preview = await previewResponse.text();
+        result.textContent = [
+          `订阅地址: ${{data.subscription_url}}`,
+          '',
+          'YAML 预览:',
+          preview
+        ].join('\\n');
+      }} else {{
+        result.textContent = text;
       }}
     }});
   </script>
@@ -623,6 +727,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "id": item.id,
             "name": item.name,
             "links_count": len(item.links),
+            "use_default_rules": item.use_default_rules,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
             "subscription_path": f"/subscriptions/{item.id}",

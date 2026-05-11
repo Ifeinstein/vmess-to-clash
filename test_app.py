@@ -49,18 +49,29 @@ class ConverterTests(unittest.TestCase):
         self.assertIn('name: "Demo"', rendered)
         self.assertIn('server: "example.com"', rendered)
         self.assertIn('MATCH,Demo', rendered)
+        self.assertNotIn("rule-providers:", rendered)
+
+    def test_build_clash_config_with_default_rules(self) -> None:
+        config = app.build_clash_config([SAMPLE_LINK], "Demo", use_default_rules=True)
+        rendered = app.config_to_yaml(config)
+
+        self.assertIn("rule-providers:", rendered)
+        self.assertIn("https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt", rendered)
+        self.assertIn("RULE-SET,proxy,Demo", rendered)
+        self.assertIn("MATCH,Demo", rendered)
 
 
 class StoreTests(unittest.TestCase):
     def test_store_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = app.SubscriptionStore(Path(temp_dir) / "subscriptions.json")
-            created = store.upsert(None, "Demo", [SAMPLE_LINK])
+            created = store.upsert(None, "Demo", [SAMPLE_LINK], use_default_rules=True)
             fetched = store.get(created.id)
 
             self.assertIsNotNone(fetched)
             self.assertEqual(fetched.name, "Demo")
             self.assertEqual(fetched.links, [SAMPLE_LINK])
+            self.assertTrue(fetched.use_default_rules)
 
 
 if __name__ == "__main__":

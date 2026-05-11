@@ -50,6 +50,14 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&url=vmess://yyy"
 
 也支持用 `text` 传换行分隔的多条链接。
 
+开启默认规则：
+
+```bash
+curl "http://127.0.0.1:8000/sub?url=vmess://xxx&default_rules=1"
+```
+
+`default_rules` 支持 `1`、`true`、`yes`。开启后会把 Loyalsoldier/clash-rules 的 `rule-providers` 和 `RULE-SET` 写入返回的 Clash YAML。
+
 ### 2. 直接 POST 转换
 
 `POST /convert`
