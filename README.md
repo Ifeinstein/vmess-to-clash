@@ -8,9 +8,9 @@
 
 - 支持单个或多个 `vmess://` / `vless://` 链接转换为 Clash 配置
 - 支持直接返回 YAML
-- 支持创建可持久访问的订阅链接
+- 支持创建不落库的一次性订阅链接
 - 自带一个简单网页，可直接粘贴链接生成订阅
-- 订阅信息默认保存在 `data/subscriptions.json`
+- 默认不在服务器保存节点原始地址
 
 ## 启动
 
@@ -35,6 +35,7 @@ python app.py --host 0.0.0.0 --port 8080
 - `http://127.0.0.1:8000/`
 
 页面里可以直接填写订阅名称和多条 `vmess://` / `vless://` 链接，提交后会返回一个可用于 Clash 的订阅地址。
+网页会在创建成功后一次性显示已经 URL 编码处理过的订阅地址，带 `#节点名` 的 `vless://` 链接也可以直接粘贴。服务器不会把节点原始地址写入历史记录。
 
 ## API
 
@@ -54,7 +55,13 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&url=vmess://yyy"
 curl "http://127.0.0.1:8000/sub?url=vless://xxx"
 ```
 
-如果 `vless://` 链接包含 `?type=...&security=...` 这类查询参数，放进 `url` 参数时需要 URL 编码；或者直接使用 `text`、`POST /convert`、网页表单粘贴原始链接。
+如果 `vless://` 链接包含 `?type=...&security=...` 这类查询参数，推荐把整个链接 URL 编码后放进 `url` 参数；或者直接使用 `text`、`POST /convert`、网页表单粘贴原始链接。
+
+注意：节点名里的 `#` 是 URL fragment，浏览器不会把它后面的内容发送给服务端，所以 `&default_rules=1` 不能放在 `#节点名` 后面。推荐写法：
+
+```bash
+curl "http://127.0.0.1:8000/sub?url=<URL编码后的vless链接>&default_rules=1"
+```
 
 也支持用 `text` 传换行分隔的多条链接。
 
@@ -93,7 +100,7 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&default_rules=1"
 
 返回内容是 Clash YAML。
 
-### 3. 创建持久订阅
+### 3. 创建一次性订阅地址
 
 `POST /api/subscriptions`
 
@@ -110,27 +117,29 @@ curl "http://127.0.0.1:8000/sub?url=vmess://xxx&default_rules=1"
 
 ```json
 {
-  "id": "abc123",
   "name": "My Nodes",
   "links_count": 2,
-  "created_at": "2026-04-10T03:00:00+00:00",
-  "updated_at": "2026-04-10T03:00:00+00:00",
-  "subscription_path": "/subscriptions/abc123",
-  "subscription_url": "http://127.0.0.1:8000/subscriptions/abc123"
+  "use_default_rules": true,
+  "subscription_path": "/sub?url=...",
+  "subscription_url": "http://127.0.0.1:8000/sub?url=..."
 }
 ```
 
 然后把 `subscription_url` 填到 Clash 客户端即可。
 
+服务端只返回处理好的订阅 URL，不会保存这次提交的节点原始地址。
+
 ### 4. 更新订阅
 
 `PUT /api/subscriptions/{id}`
 
-请求体与创建时相同。
+历史订阅已关闭，这个接口会返回 404。
 
 ### 5. 查看订阅列表
 
 `GET /api/subscriptions`
+
+历史记录已关闭，这个接口返回空列表。
 
 ### 6. 健康检查
 

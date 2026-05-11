@@ -1,8 +1,7 @@
 import base64
 import json
-import tempfile
 import unittest
-from pathlib import Path
+from urllib.parse import parse_qs, quote
 
 import app
 
@@ -91,6 +90,54 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(proxy["reality-opts"]["short-id"], "abcd")
         self.assertEqual(proxy["reality-opts"]["spider-x"], "/")
 
+    def test_sub_query_rebuilds_unencoded_vless_params(self) -> None:
+        query = parse_qs(
+            "url=vless://33333333-3333-3333-3333-333333333333@reality.example.org:443?type=tcp"
+            "&encryption=none&security=reality&sni=www.example.org&fp=chrome"
+            "&flow=xtls-rprx-vision&pbk=public-key-value&sid=abcd&spx=%2F"
+            "&default_rules=1"
+        )
+        links = app.links_from_sub_query(query)
+        proxy = app.link_to_clash_proxy(links[0], 1)
+
+        self.assertTrue(app.truthy(query["default_rules"][-1]))
+        self.assertEqual(proxy["reality-opts"]["public-key"], "public-key-value")
+        self.assertEqual(proxy["reality-opts"]["spider-x"], "/")
+
+    def test_encoded_sub_query_with_default_rules(self) -> None:
+        encoded_link = quote(SAMPLE_VLESS_REALITY_LINK, safe="")
+        query = parse_qs(f"url={encoded_link}&default_rules=1")
+        config = app.build_clash_config(
+            app.links_from_sub_query(query),
+            use_default_rules=app.truthy(query["default_rules"][-1]),
+        )
+        rendered = app.config_to_yaml(config)
+
+        self.assertIn("rule-providers:", rendered)
+        self.assertIn("RULE-SET,proxy,Proxy Subscription", rendered)
+
+    def test_direct_subscription_path_encodes_links(self) -> None:
+        path = app.direct_subscription_path([SAMPLE_VLESS_REALITY_LINK], use_default_rules=True)
+
+        self.assertTrue(path.startswith("/sub?url=vless%3A%2F%2F"))
+        self.assertIn("%23reality-node", path)
+        self.assertTrue(path.endswith("&default_rules=1"))
+
+    def test_one_time_subscription_response_does_not_store_links(self) -> None:
+        response = app.one_time_subscription_response(
+            [SAMPLE_VLESS_REALITY_LINK],
+            "Demo",
+            use_default_rules=True,
+            base_url="https://example.test:8443",
+        )
+
+        self.assertNotIn("id", response)
+        self.assertNotIn("links", response)
+        self.assertEqual(response["links_count"], 1)
+        self.assertTrue(response["subscription_url"].startswith("https://example.test:8443/sub?url="))
+        self.assertIn("%23reality-node", response["subscription_url"])
+        self.assertTrue(response["subscription_url"].endswith("&default_rules=1"))
+
     def test_build_clash_config_contains_group(self) -> None:
         config = app.build_clash_config([SAMPLE_LINK], "Demo")
         rendered = app.config_to_yaml(config)
@@ -108,20 +155,6 @@ class ConverterTests(unittest.TestCase):
         self.assertIn("https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt", rendered)
         self.assertIn("RULE-SET,proxy,Demo", rendered)
         self.assertIn("MATCH,Demo", rendered)
-
-
-class StoreTests(unittest.TestCase):
-    def test_store_roundtrip(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = app.SubscriptionStore(Path(temp_dir) / "subscriptions.json")
-            created = store.upsert(None, "Demo", [SAMPLE_LINK], use_default_rules=True)
-            fetched = store.get(created.id)
-
-            self.assertIsNotNone(fetched)
-            self.assertEqual(fetched.name, "Demo")
-            self.assertEqual(fetched.links, [SAMPLE_LINK])
-            self.assertTrue(fetched.use_default_rules)
-
 
 if __name__ == "__main__":
     unittest.main()

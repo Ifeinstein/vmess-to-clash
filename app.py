@@ -2,19 +2,13 @@ import argparse
 import base64
 import json
 import os
-import secrets
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 
-ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
-STORE_PATH = DATA_DIR / "subscriptions.json"
 DEFAULT_RULE_BASE_URL = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release"
 DEFAULT_RULE_PROVIDER_SPECS = {
     "reject": "domain",
@@ -293,6 +287,65 @@ def extract_vmess_links(text: str) -> list[str]:
     return extract_links(text)
 
 
+def links_from_sub_query(query: dict[str, list[str]]) -> list[str]:
+    links = [item for item in query.get("url", []) if item.strip()]
+    if links and links[-1].startswith("vless://"):
+        vless_params = [
+            "type",
+            "encryption",
+            "security",
+            "pbk",
+            "fp",
+            "sni",
+            "sid",
+            "spx",
+            "flow",
+            "host",
+            "path",
+            "serviceName",
+            "alpn",
+            "allowInsecure",
+        ]
+        extra_params = [
+            f"{key}={value}"
+            for key in vless_params
+            for value in query.get(key, [])
+            if value
+        ]
+        if extra_params:
+            separator = "&" if "?" in links[-1] else "?"
+            links[-1] = f"{links[-1]}{separator}{'&'.join(extra_params)}"
+    if not links and "text" in query:
+        links = extract_links("\n".join(query["text"]))
+    return links
+
+
+def direct_subscription_path(links: list[str], use_default_rules: bool = False) -> str:
+    params: list[tuple[str, str]] = [("url", link) for link in links]
+    if use_default_rules:
+        params.append(("default_rules", "1"))
+    return f"/sub?{urlencode(params, quote_via=quote)}"
+
+
+def one_time_subscription_response(
+    links: list[str],
+    name: str,
+    use_default_rules: bool,
+    base_url: str = "",
+) -> dict[str, Any]:
+    path = direct_subscription_path(links, use_default_rules)
+    url = f"{base_url}{path}" if base_url else path
+    return {
+        "name": name,
+        "links_count": len(links),
+        "use_default_rules": use_default_rules,
+        "subscription_path": path,
+        "subscription_url": url,
+        "direct_subscription_path": path,
+        "direct_subscription_url": url,
+    }
+
+
 def default_rule_providers() -> dict[str, dict[str, Any]]:
     return {
         name: {
@@ -404,95 +457,7 @@ def config_to_yaml(config: dict[str, Any]) -> str:
     return dump_yaml(config) + "\n"
 
 
-@dataclass
-class Subscription:
-    id: str
-    name: str
-    links: list[str]
-    use_default_rules: bool
-    created_at: str
-    updated_at: str
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "links": self.links,
-            "use_default_rules": self.use_default_rules,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Subscription":
-        return cls(
-            id=str(data["id"]),
-            name=str(data["name"]),
-            links=[str(link) for link in data.get("links", [])],
-            use_default_rules=truthy(data.get("use_default_rules")),
-            created_at=str(data["created_at"]),
-            updated_at=str(data["updated_at"]),
-        )
-
-
-class SubscriptionStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self.path.write_text("{}", encoding="utf-8")
-
-    def _load(self) -> dict[str, Any]:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-
-    def _save(self, payload: dict[str, Any]) -> None:
-        self.path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    def all(self) -> list[Subscription]:
-        raw = self._load()
-        return [Subscription.from_dict(item) for item in raw.values()]
-
-    def get(self, subscription_id: str) -> Subscription | None:
-        raw = self._load().get(subscription_id)
-        if not raw:
-            return None
-        return Subscription.from_dict(raw)
-
-    def upsert(
-        self,
-        subscription_id: str | None,
-        name: str,
-        links: list[str],
-        use_default_rules: bool = False,
-    ) -> Subscription:
-        payload = self._load()
-        now = utc_now_iso()
-        if subscription_id and subscription_id in payload:
-            created_at = payload[subscription_id]["created_at"]
-            actual_id = subscription_id
-        else:
-            created_at = now
-            actual_id = subscription_id or secrets.token_urlsafe(8)
-
-        item = Subscription(
-            id=actual_id,
-            name=name,
-            links=links,
-            use_default_rules=use_default_rules,
-            created_at=created_at,
-            updated_at=now,
-        )
-        payload[actual_id] = item.as_dict()
-        self._save(payload)
-        return item
-
-
 class AppHandler(BaseHTTPRequestHandler):
-    store = SubscriptionStore(STORE_PATH)
-
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
 
@@ -505,38 +470,20 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/subscriptions":
-            subscriptions = [self.subscription_to_response(item) for item in self.store.all()]
-            self._send_json({"items": subscriptions})
+            self._send_json({"items": []})
             return
 
         if parsed.path.startswith("/api/subscriptions/"):
-            subscription_id = parsed.path.rsplit("/", 1)[-1]
-            subscription = self.store.get(subscription_id)
-            if not subscription:
-                self._send_error_json(HTTPStatus.NOT_FOUND, "Subscription not found")
-                return
-            self._send_json(self.subscription_to_response(subscription))
+            self._send_error_json(HTTPStatus.NOT_FOUND, "Subscription history is disabled")
             return
 
         if parsed.path.startswith("/subscriptions/"):
-            subscription_id = parsed.path.rsplit("/", 1)[-1]
-            subscription = self.store.get(subscription_id)
-            if not subscription:
-                self._send_error_yaml(HTTPStatus.NOT_FOUND, "Subscription not found")
-                return
-            config = build_clash_config(
-                subscription.links,
-                subscription.name,
-                subscription.use_default_rules,
-            )
-            self._send_yaml(config_to_yaml(config))
+            self._send_error_yaml(HTTPStatus.NOT_FOUND, "Subscription history is disabled")
             return
 
         if parsed.path == "/sub":
             query = parse_qs(parsed.query)
-            links = [item for item in query.get("url", []) if item.strip()]
-            if not links and "text" in query:
-                links = extract_links("\n".join(query["text"]))
+            links = links_from_sub_query(query)
             use_default_rules = truthy(query.get("default_rules", [""])[-1])
             try:
                 config = build_clash_config(links, use_default_rules=use_default_rules)
@@ -576,8 +523,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
 
-            subscription = self.store.upsert(None, name, links, use_default_rules)
-            self._send_json(self.subscription_to_response(subscription), status=HTTPStatus.CREATED)
+            response = one_time_subscription_response(
+                links,
+                name,
+                use_default_rules,
+                self.absolute_url(""),
+            )
+            self._send_json(response, status=HTTPStatus.CREATED)
             return
 
         self._send_error_json(HTTPStatus.NOT_FOUND, "Route not found")
@@ -588,26 +540,7 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.NOT_FOUND, "Route not found")
             return
 
-        subscription_id = parsed.path.rsplit("/", 1)[-1]
-        if not self.store.get(subscription_id):
-            self._send_error_json(HTTPStatus.NOT_FOUND, "Subscription not found")
-            return
-
-        payload = self.read_json_body()
-        if payload is None:
-            return
-
-        links = self.links_from_payload(payload)
-        name = str(payload.get("name") or "Proxy Subscription").strip() or "Proxy Subscription"
-        use_default_rules = truthy(payload.get("use_default_rules"))
-        try:
-            build_clash_config(links, name, use_default_rules)
-        except ValueError as exc:
-            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-            return
-
-        subscription = self.store.upsert(subscription_id, name, links, use_default_rules)
-        self._send_json(self.subscription_to_response(subscription))
+        self._send_error_json(HTTPStatus.NOT_FOUND, "Subscription history is disabled")
 
     def read_json_body(self) -> dict[str, Any] | None:
         length = as_int(self.headers.get("Content-Length"), 0)
@@ -629,21 +562,7 @@ class AppHandler(BaseHTTPRequestHandler):
         return links
 
     def render_index(self) -> str:
-        subscriptions = self.store.all()
-        rows = "".join(
-            f"""
-            <tr>
-              <td>{self.escape_html(item.name)}</td>
-              <td><code>/subscriptions/{self.escape_html(item.id)}</code></td>
-              <td>{len(item.links)}</td>
-              <td>{"是" if item.use_default_rules else "否"}</td>
-              <td>{self.escape_html(item.updated_at)}</td>
-            </tr>
-            """
-            for item in subscriptions
-        )
-        if not rows:
-            rows = '<tr><td colspan="5">还没有订阅，先在上面的表单里粘贴 vmess 或 vless 链接。</td></tr>'
+        rows = '<tr><td colspan="5">历史记录已关闭。订阅地址只会在创建成功后显示一次，服务器不会保存节点原始地址。</td></tr>'
 
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -731,6 +650,16 @@ class AppHandler(BaseHTTPRequestHandler):
       color: #6b7280;
       font-size: 0.94rem;
     }}
+    .result-block {{
+      margin-top: 14px;
+    }}
+    .result-block:first-of-type {{
+      margin-top: 0;
+    }}
+    .result-block h3 {{
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }}
     pre {{
       white-space: pre-wrap;
       word-break: break-word;
@@ -739,6 +668,9 @@ class AppHandler(BaseHTTPRequestHandler):
       background: #2a2114;
       color: #fef3c7;
       min-height: 220px;
+    }}
+    #subscription-url {{
+      min-height: auto;
     }}
     table {{
       width: 100%;
@@ -770,7 +702,7 @@ class AppHandler(BaseHTTPRequestHandler):
     <section class="hero">
       <span class="pill">Zero dependency service</span>
       <h1>VMess/VLESS 地址转 Clash 订阅</h1>
-      <p>把一个或多个 <code>vmess://</code> 或 <code>vless://</code> 链接粘进来，服务会生成可持久访问的 Clash 订阅地址，也支持直接用接口调用。</p>
+      <p>把一个或多个 <code>vmess://</code> 或 <code>vless://</code> 链接粘进来，服务会生成可直接使用的 Clash 订阅地址，也支持直接用接口调用。</p>
     </section>
 
     <section class="grid">
@@ -791,12 +723,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
       <div class="panel">
         <h2>结果与预览</h2>
-        <pre id="result">提交后会在这里显示订阅地址和 YAML 预览。</pre>
+        <div class="result-block">
+          <h3>订阅地址</h3>
+          <pre id="subscription-url">提交后会在这里显示订阅地址。</pre>
+        </div>
+        <div class="result-block">
+          <h3>YAML 预览</h3>
+          <pre id="yaml-preview">提交后会在这里显示 YAML 预览。</pre>
+        </div>
       </div>
     </section>
 
     <section class="panel" style="margin-top: 20px;">
-      <h2>已有订阅</h2>
+      <h2>历史记录</h2>
       <table>
         <thead>
           <tr>
@@ -813,7 +752,8 @@ class AppHandler(BaseHTTPRequestHandler):
   </main>
   <script>
     const form = document.getElementById('create-form');
-    const result = document.getElementById('result');
+    const subscriptionUrlOutput = document.getElementById('subscription-url');
+    const yamlPreviewOutput = document.getElementById('yaml-preview');
     form.addEventListener('submit', async (event) => {{
       event.preventDefault();
       const payload = {{
@@ -831,35 +771,23 @@ class AppHandler(BaseHTTPRequestHandler):
         const data = JSON.parse(text);
         const previewResponse = await fetch(data.subscription_path);
         const preview = await previewResponse.text();
-        result.textContent = [
-          `订阅地址: ${{data.subscription_url}}`,
-          '',
-          'YAML 预览:',
-          preview
-        ].join('\\n');
+        const subscriptionUrl = new URL(data.subscription_path, window.location.origin).href;
+        subscriptionUrlOutput.textContent = subscriptionUrl;
+        yamlPreviewOutput.textContent = preview;
       }} else {{
-        result.textContent = text;
+        subscriptionUrlOutput.textContent = '';
+        yamlPreviewOutput.textContent = text;
       }}
     }});
   </script>
 </body>
 </html>"""
 
-    def subscription_to_response(self, item: Subscription) -> dict[str, Any]:
-        return {
-            "id": item.id,
-            "name": item.name,
-            "links_count": len(item.links),
-            "use_default_rules": item.use_default_rules,
-            "created_at": item.created_at,
-            "updated_at": item.updated_at,
-            "subscription_path": f"/subscriptions/{item.id}",
-            "subscription_url": self.absolute_url(f"/subscriptions/{item.id}"),
-        }
-
     def absolute_url(self, path: str) -> str:
-        host = self.headers.get("Host", "127.0.0.1:8000")
-        return f"http://{host}{path}"
+        host = self.headers.get("X-Forwarded-Host", self.headers.get("Host", "127.0.0.1:8000"))
+        host = host.split(",", 1)[0].strip() or "127.0.0.1:8000"
+        proto = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip() or "http"
+        return f"{proto}://{host}{path}"
 
     def escape_html(self, text: str) -> str:
         return (
