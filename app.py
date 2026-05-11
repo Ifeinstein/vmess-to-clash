@@ -9,7 +9,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +50,28 @@ def decode_vmess_link(link: str) -> dict[str, Any]:
         raise ValueError("Invalid vmess link payload") from exc
 
     return data
+
+
+def decode_vless_link(link: str) -> dict[str, Any]:
+    parsed = urlparse(link.strip())
+    if parsed.scheme != "vless":
+        raise ValueError("Only vless:// links are supported")
+
+    uuid = parsed.username or ""
+    server = parsed.hostname or ""
+    if not uuid or not server:
+        raise ValueError("vless link is missing uuid or server")
+
+    query = {key: values[-1] for key, values in parse_qs(parsed.query).items() if values}
+    query.update(
+        {
+            "id": unquote(uuid),
+            "add": server,
+            "port": parsed.port or 443,
+            "ps": unquote(parsed.fragment) if parsed.fragment else "",
+        }
+    )
+    return query
 
 
 def truthy(value: Any) -> bool:
@@ -161,13 +183,114 @@ def vmess_to_clash_proxy(vmess: dict[str, Any], index: int) -> dict[str, Any]:
     return proxy
 
 
-def extract_vmess_links(text: str) -> list[str]:
+def vless_to_clash_proxy(vless: dict[str, Any], index: int) -> dict[str, Any]:
+    server = str(vless.get("add") or "").strip()
+    uuid = str(vless.get("id") or "").strip()
+    port = as_int(vless.get("port"), 443)
+
+    if not server or not uuid:
+        raise ValueError("vless entry is missing add or id")
+
+    network = str(vless.get("type") or vless.get("net") or "tcp").strip().lower() or "tcp"
+    security = str(vless.get("security") or "").strip().lower()
+    tls_enabled = security in {"tls", "reality"} or truthy(vless.get("tls"))
+    host = str(vless.get("host") or "").strip()
+    path = str(vless.get("path") or "").strip()
+    sni = str(vless.get("sni") or "").strip()
+    alpn = clean_host_list(vless.get("alpn"))
+    fingerprint = str(vless.get("fp") or "").strip()
+    flow = str(vless.get("flow") or "").strip()
+
+    proxy: dict[str, Any] = {
+        "name": pick_name(vless, index),
+        "type": "vless",
+        "server": server,
+        "port": port,
+        "uuid": uuid,
+        "udp": True,
+        "tls": tls_enabled,
+        "network": network,
+    }
+
+    if tls_enabled:
+        proxy["servername"] = sni or host or server
+    if alpn:
+        proxy["alpn"] = alpn
+    if fingerprint:
+        proxy["client-fingerprint"] = fingerprint
+    if flow:
+        proxy["flow"] = flow
+    if truthy(vless.get("allowInsecure")):
+        proxy["skip-cert-verify"] = True
+    if security == "reality":
+        reality_opts: dict[str, Any] = {}
+        public_key = str(vless.get("pbk") or vless.get("public-key") or "").strip()
+        short_id = str(vless.get("sid") or vless.get("short-id") or "").strip()
+        spider_x = str(vless.get("spx") or vless.get("spider-x") or "").strip()
+        if public_key:
+            reality_opts["public-key"] = public_key
+        if short_id:
+            reality_opts["short-id"] = short_id
+        if spider_x:
+            reality_opts["spider-x"] = spider_x
+        if reality_opts:
+            proxy["reality-opts"] = reality_opts
+
+    if network == "ws":
+        ws_opts: dict[str, Any] = {}
+        if path:
+            ws_opts["path"] = path
+        if host:
+            ws_opts["headers"] = {"Host": host}
+        if ws_opts:
+            proxy["ws-opts"] = ws_opts
+    elif network == "http":
+        http_opts: dict[str, Any] = {}
+        if path:
+            http_opts["path"] = [path]
+        if host:
+            http_opts["headers"] = {"Host": [host]}
+        if http_opts:
+            proxy["http-opts"] = http_opts
+    elif network == "h2":
+        h2_opts: dict[str, Any] = {}
+        hosts = clean_host_list(host)
+        if hosts:
+            h2_opts["host"] = hosts
+        if path:
+            h2_opts["path"] = path
+        if h2_opts:
+            proxy["h2-opts"] = h2_opts
+    elif network == "grpc":
+        grpc_opts: dict[str, Any] = {}
+        service_name = str(vless.get("serviceName") or "").strip() or path.lstrip("/")
+        if service_name:
+            grpc_opts["grpc-service-name"] = service_name
+        if grpc_opts:
+            proxy["grpc-opts"] = grpc_opts
+
+    return proxy
+
+
+def link_to_clash_proxy(link: str, index: int) -> dict[str, Any]:
+    if link.startswith("vmess://"):
+        return vmess_to_clash_proxy(decode_vmess_link(link), index)
+    if link.startswith("vless://"):
+        return vless_to_clash_proxy(decode_vless_link(link), index)
+    raise ValueError("Only vmess:// and vless:// links are supported")
+
+
+def extract_links(text: str) -> list[str]:
     links: list[str] = []
     for line in text.replace("\r", "\n").split("\n"):
         candidate = line.strip()
-        if candidate.startswith("vmess://"):
+        if candidate.startswith(("vmess://", "vless://")):
             links.append(candidate)
     return links
+
+
+def extract_vmess_links(text: str) -> list[str]:
+    return extract_links(text)
 
 
 def default_rule_providers() -> dict[str, dict[str, Any]]:
@@ -206,13 +329,13 @@ def default_rules(proxy_policy: str) -> list[str]:
 
 def build_clash_config(
     links: list[str],
-    subscription_name: str = "VMess Subscription",
+    subscription_name: str = "Proxy Subscription",
     use_default_rules: bool = False,
 ) -> dict[str, Any]:
     if not links:
-        raise ValueError("No vmess links supplied")
+        raise ValueError("No vmess or vless links supplied")
 
-    proxies = [vmess_to_clash_proxy(decode_vmess_link(link), index) for index, link in enumerate(links, start=1)]
+    proxies = [link_to_clash_proxy(link, index) for index, link in enumerate(links, start=1)]
     proxy_names = [proxy["name"] for proxy in proxies]
 
     config: dict[str, Any] = {
@@ -413,7 +536,7 @@ class AppHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             links = [item for item in query.get("url", []) if item.strip()]
             if not links and "text" in query:
-                links = extract_vmess_links("\n".join(query["text"]))
+                links = extract_links("\n".join(query["text"]))
             use_default_rules = truthy(query.get("default_rules", [""])[-1])
             try:
                 config = build_clash_config(links, use_default_rules=use_default_rules)
@@ -433,7 +556,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/convert":
             links = self.links_from_payload(payload)
-            name = str(payload.get("name") or "VMess Subscription")
+            name = str(payload.get("name") or "Proxy Subscription")
             use_default_rules = truthy(payload.get("use_default_rules"))
             try:
                 config = build_clash_config(links, name, use_default_rules)
@@ -445,7 +568,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/subscriptions":
             links = self.links_from_payload(payload)
-            name = str(payload.get("name") or "VMess Subscription").strip() or "VMess Subscription"
+            name = str(payload.get("name") or "Proxy Subscription").strip() or "Proxy Subscription"
             use_default_rules = truthy(payload.get("use_default_rules"))
             try:
                 build_clash_config(links, name, use_default_rules)
@@ -475,7 +598,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         links = self.links_from_payload(payload)
-        name = str(payload.get("name") or "VMess Subscription").strip() or "VMess Subscription"
+        name = str(payload.get("name") or "Proxy Subscription").strip() or "Proxy Subscription"
         use_default_rules = truthy(payload.get("use_default_rules"))
         try:
             build_clash_config(links, name, use_default_rules)
@@ -502,7 +625,7 @@ class AppHandler(BaseHTTPRequestHandler):
         else:
             links = []
         if not links and payload.get("text"):
-            links = extract_vmess_links(str(payload["text"]))
+            links = extract_links(str(payload["text"]))
         return links
 
     def render_index(self) -> str:
@@ -520,14 +643,14 @@ class AppHandler(BaseHTTPRequestHandler):
             for item in subscriptions
         )
         if not rows:
-            rows = '<tr><td colspan="5">还没有订阅，先在上面的表单里粘贴 vmess 链接。</td></tr>'
+            rows = '<tr><td colspan="5">还没有订阅，先在上面的表单里粘贴 vmess 或 vless 链接。</td></tr>'
 
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VMess 转 Clash 订阅</title>
+  <title>VMess/VLESS 转 Clash 订阅</title>
   <style>
     :root {{
       color-scheme: light;
@@ -646,8 +769,8 @@ class AppHandler(BaseHTTPRequestHandler):
   <main>
     <section class="hero">
       <span class="pill">Zero dependency service</span>
-      <h1>VMess 地址转 Clash 订阅</h1>
-      <p>把一个或多个 <code>vmess://</code> 链接粘进来，服务会生成可持久访问的 Clash 订阅地址，也支持直接用接口调用。</p>
+      <h1>VMess/VLESS 地址转 Clash 订阅</h1>
+      <p>把一个或多个 <code>vmess://</code> 或 <code>vless://</code> 链接粘进来，服务会生成可持久访问的 Clash 订阅地址，也支持直接用接口调用。</p>
     </section>
 
     <section class="grid">
@@ -655,9 +778,9 @@ class AppHandler(BaseHTTPRequestHandler):
         <h2>创建订阅</h2>
         <form id="create-form">
           <label for="name">订阅名称</label>
-          <input id="name" name="name" value="My VMess Subscription">
-          <p class="hint">每行一个 vmess 链接。</p>
-          <textarea id="text" name="text" placeholder="vmess://..."></textarea>
+          <input id="name" name="name" value="My Proxy Subscription">
+          <p class="hint">每行一个 vmess 或 vless 链接。</p>
+          <textarea id="text" name="text" placeholder="vmess://...&#10;vless://..."></textarea>
           <label class="check-row">
             <input id="use-default-rules" name="use_default_rules" type="checkbox">
             <span>使用 Loyalsoldier/clash-rules 默认规则，并写入生成的 YAML</span>
@@ -782,12 +905,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def run_server(host: str, port: int) -> None:
     server = ThreadingHTTPServer((host, port), AppHandler)
-    print(f"VMess to Clash service listening on http://{host}:{port}")
+    print(f"VMess/VLESS to Clash service listening on http://{host}:{port}")
     server.serve_forever()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="VMess link to Clash subscription service")
+    parser = argparse.ArgumentParser(description="VMess/VLESS link to Clash subscription service")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     return parser.parse_args()
