@@ -44,6 +44,12 @@ SAMPLE_VLESS_REALITY_LINK = (
 
 
 class ConverterTests(unittest.TestCase):
+    def test_index_checks_default_options(self) -> None:
+        html = app.AppHandler.render_index(object.__new__(app.AppHandler))
+
+        self.assertIn('name="use_default_rules" type="checkbox" checked', html)
+        self.assertIn('name="use_udp" type="checkbox" checked', html)
+
     def test_decode_and_convert_vmess(self) -> None:
         decoded = app.decode_vmess_link(SAMPLE_LINK)
         proxy = app.vmess_to_clash_proxy(decoded, 1)

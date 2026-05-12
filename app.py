@@ -727,11 +727,11 @@ class AppHandler(BaseHTTPRequestHandler):
           <p class="hint">每行一个 vmess 或 vless 链接。</p>
           <textarea id="text" name="text" placeholder="vmess://...&#10;vless://..."></textarea>
           <label class="check-row">
-            <input id="use-default-rules" name="use_default_rules" type="checkbox">
+            <input id="use-default-rules" name="use_default_rules" type="checkbox" checked>
             <span>使用 Loyalsoldier/clash-rules 默认规则，并写入生成的 YAML</span>
           </label>
           <label class="check-row">
-            <input id="use-udp" name="use_udp" type="checkbox">
+            <input id="use-udp" name="use_udp" type="checkbox" checked>
             <span>启用 UDP</span>
           </label>
           <button type="submit">生成订阅链接</button>
