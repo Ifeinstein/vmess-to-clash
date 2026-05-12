@@ -728,7 +728,7 @@ class AppHandler(BaseHTTPRequestHandler):
           <textarea id="text" name="text" placeholder="vmess://...&#10;vless://..."></textarea>
           <label class="check-row">
             <input id="use-default-rules" name="use_default_rules" type="checkbox" checked>
-            <span>使用 Loyalsoldier/clash-rules 默认规则，并写入生成的 YAML</span>
+            <span>使用 Loyalsoldier/clash-rules 默认规则</span>
           </label>
           <label class="check-row">
             <input id="use-udp" name="use_udp" type="checkbox" checked>
