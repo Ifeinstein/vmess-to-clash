@@ -384,7 +384,7 @@ def default_rules(proxy_policy: str) -> list[str]:
         f"RULE-SET,telegramcidr,{proxy_policy}",
         "GEOIP,LAN,DIRECT",
         "GEOIP,CN,DIRECT",
-        f"MATCH,{proxy_policy}",
+        "MATCH,DIRECT",
     ]
 
 
